@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ri-seal"
+version = "0.1.0"
+description = "Tamper-evident receipts and Ed25519 seals (in-toto + DSSE) for AI-agent work, with optional Bitcoin / RFC 3161 time anchoring."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "Root Inside Co., Ltd."}]
+requires-python = ">=3.10"
+classifiers = ["Operating System :: MacOS", "Operating System :: POSIX :: Linux"]
+dependencies = ["cryptography>=42"]
+
+[project.optional-dependencies]
+anchor = ["certifi"]
+test = ["pytest"]
+
+[project.scripts]
+ri-seal = "ri_seal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

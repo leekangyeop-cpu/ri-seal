@@ -1,0 +1,6 @@
+ri-seal
+Copyright 2026 Root Inside Co., Ltd.
+
+This product is provided "AS IS" under the Apache License 2.0, without warranties of any kind.
+It is not a certification service and does not provide legal advice.
+Optional: verifying Bitcoin time proofs uses the separate opentimestamps-client (LGPL-3.0), which is not bundled.
