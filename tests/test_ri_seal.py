@@ -19,7 +19,8 @@ def proj(tmp_path, monkeypatch):
     (root / "src").mkdir(parents=True)
     (root / "src" / "a.py").write_text("print(1)\n")
     p = Project(root)
-    info = init(p, key_dir=tmp_path / "home" / ".riseal" / "keys")
+    # 0.2: the default became strict; these 0.1 tests check normal-mode behaviour, so they ask for it explicitly
+    info = init(p, key_dir=tmp_path / "home" / ".riseal" / "keys", privacy="normal")
     return p, info
 
 

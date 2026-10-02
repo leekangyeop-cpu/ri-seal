@@ -2,7 +2,8 @@
 
 Design rules (why this tool carries little liability):
   * Local only. No server, no telemetry. Nothing leaves the machine unless you run `ri-seal anchor`.
-  * Records fingerprints (SHA-256), never file contents or command text.
+  * Records fingerprints (SHA-256), never file contents or command text. (0.2: for a command recognised as a test
+    run, the class "test" and the pass/fail counts of its summary line are kept — integers, not output.)
   * Never blocks the agent: the hook always exits 0 and prints nothing.
   * A seal proves "these records looked like this at that time". It does not prove the records are correct.
 """
@@ -15,6 +16,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,6 +69,8 @@ class Project:
         self.pubkey = self.dir / "pubkey.pem"
         self.config = self.dir / "config.json"
         self.proofs = self.dir / "proofs"
+        self.claims = self.dir / "claims.jsonl"            # 0.2: claim ↔ receipt self-check (measurement only)
+        self.verify_log = self.dir / "verify_log.jsonl"    # 0.2: result of each CLI `verify`, for `status`
 
     def cfg(self) -> dict:
         return json.loads(self.config.read_text("utf-8")) if self.config.exists() else {}
@@ -85,10 +89,17 @@ def keyid_of(pub: Ed25519PublicKey) -> str:
     return sha256_hex(pub.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw))[:16]
 
 
-def init(proj: Project, key_dir: Path | None = None, privacy: str = "standard") -> dict:
-    """Create .riseal/ and a signing key kept OUTSIDE the project (~/.riseal/keys, mode 0600). Refuses to overwrite."""
-    if privacy not in ("standard", "strict"):
-        raise ValueError("privacy must be 'standard' or 'strict'")
+PRIVACY_ALIASES = {"strict": "strict", "standard": "standard", "normal": "standard"}
+
+
+def init(proj: Project, key_dir: Path | None = None, privacy: str = "strict") -> dict:
+    """Create .riseal/ and a signing key kept OUTSIDE the project (~/.riseal/keys, mode 0600). Refuses to overwrite.
+
+    0.2: the default is `strict` (every path name stored only as an HMAC). `normal` (stored as `standard`, the 0.1
+    behaviour) keeps non-sensitive project-relative paths readable."""
+    if privacy not in PRIVACY_ALIASES:
+        raise ValueError("privacy must be 'strict' or 'normal'")
+    privacy = PRIVACY_ALIASES[privacy]
     if proj.config.exists():
         raise FileExistsError(f"already initialised: {proj.config}")
     proj.dir.mkdir(parents=True, exist_ok=True)
@@ -267,6 +278,57 @@ def keyed(pep: bytes, text: str) -> str:
 # ── receipts (one row per agent tool call) ───────────────────────────
 
 PATH_KEYS = ("file_path", "notebook_path", "path")
+EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+
+# A shell command is classified as a test run when one of its segments (split on ; & | ( ) and newlines) STARTS with a
+# test runner — `grep pytest x` or `echo "run pytest"` do not count. Only the class ("test") is stored — never the command.
+_SEGMENT = re.compile(r"[;&|()\n]+")
+_ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$")
+_RUNNER_PREFIX = {("uv", "run"), ("poetry", "run"), ("pipenv", "run"), ("hatch", "run"), ("pdm", "run")}
+_TEST_HEADS = {"pytest", "py.test", "tox", "nox"}
+_COUNT_LINE = re.compile(r"(?<!\d)\d+\s+(?:passed|failed|errors?)\b")
+_COUNT_ITEM = re.compile(r"(?<!\d)(\d+)\s+(passed|failed|errors?)\b")
+
+
+def command_class(cmd: str) -> str | None:
+    for seg in _SEGMENT.split(cmd or ""):
+        toks = seg.split()
+        while toks and (_ENV_ASSIGN.match(toks[0]) or toks[0] in ("env", "time", "exec", "command")):
+            toks = toks[1:]
+        if len(toks) >= 2 and (toks[0], toks[1]) in _RUNNER_PREFIX:
+            toks = toks[2:]
+        if not toks:
+            continue
+        head = toks[0].rsplit("/", 1)[-1]
+        if head in _TEST_HEADS:
+            return "test"
+        if re.fullmatch(r"python[\d.]*", head) and len(toks) >= 3 and toks[1] == "-m" and toks[2] in ("pytest", "unittest"):
+            return "test"
+        if head in ("npm", "pnpm", "yarn") and toks[1:2] == ["test"] or toks[1:3] == ["run", "test"] and head in ("npm", "pnpm", "yarn"):
+            return "test"
+        if head in ("go", "cargo", "make") and toks[1:2] == ["test"]:
+            return "test"
+    return None
+
+
+def _response_text(resp) -> str:
+    if isinstance(resp, str):
+        return resp
+    if isinstance(resp, dict):
+        return "\n".join(str(resp.get(k) or "") for k in ("stdout", "stderr", "output"))
+    return ""
+
+
+def summary_counts(resp) -> dict | None:
+    """Counts from the LAST pytest-style summary line of a test run's output ("12 passed, 1 failed in 0.3s").
+    Only these integers are stored; the output itself never is."""
+    lines = [l for l in _response_text(resp).splitlines() if _COUNT_LINE.search(l)]
+    if not lines:
+        return None
+    out = {"passed": 0, "failed": 0, "errors": 0}
+    for n, word in _COUNT_ITEM.findall(lines[-1]):
+        out["errors" if word.startswith("error") else word] = int(n)
+    return out
 
 
 def receipt_from_hook(proj: Project, event: dict) -> dict:
@@ -306,6 +368,14 @@ def receipt_from_hook(proj: Project, event: dict) -> dict:
     cmd = ti.get("command")
     if isinstance(cmd, str):
         ev["command_hmac"] = keyed(pep, cmd)
+        if command_class(cmd) == "test":           # 0.2: the class and the summary counts only — for the claim check
+            ev["cmd_class"] = "test"
+            counts = summary_counts(event.get("tool_response"))
+            if counts is not None:
+                ev["test_counts"] = counts
+    agent = event.get("agent_id")                  # set by Claude Code for sub-agent tool calls
+    if isinstance(agent, str) and agent:
+        ev["agent_hmac"] = keyed(pep, "agent:" + agent)[:16]
     return append(proj.receipts, lambda prev, seq: {"seq": seq, "prev": prev, "ts": now_iso(), "event": ev})
 
 

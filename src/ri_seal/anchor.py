@@ -28,7 +28,8 @@ def _ctx() -> ssl.SSLContext:
 
 
 def _post(url: str, body: bytes, headers: dict, timeout: int = 30) -> bytes:
-    req = urllib.request.Request(url, data=body, headers={"User-Agent": "ri-seal/0.1", **headers}, method="POST")
+    from . import __version__
+    req = urllib.request.Request(url, data=body, headers={"User-Agent": f"ri-seal/{__version__}", **headers}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout, context=_ctx()) as r:
         return r.read()
 
